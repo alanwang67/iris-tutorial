@@ -180,8 +180,19 @@ Qed.
 Lemma release_spec γ v P :
   {{{ is_lock γ v P ∗ locked γ ∗ P }}} release v {{{ RET #(); True }}}.
 Proof.
-  (* exercise *)
-Admitted.
+  iIntros "%Φ [(%l & %H1 & H4) [H2 H3]] HΦ". rewrite /release.
+  wp_pures. rewrite /is_lock. 
+  rewrite H1.
+  (* Open the lock invariant so we can analyze the two cases *)
+  iInv "H4" as ([]) "(H5 & H6)".
+  - (* We don't have access to the lock in the first place*)
+    wp_store. iModIntro. iSplitR "HΦ".
+    + iNext. rewrite /lock_inv. iExists false. iFrame.
+    + iApply "HΦ". auto.
+  - (* We tried to release it twice? *)
+    wp_store. iModIntro. iDestruct "H6" as "[H6 H7]".
+    iExFalso. iApply (locked_excl with "H2 H6").
+Qed.
 
 (* ================================================================= *)
 (** ** Example Client *)
@@ -236,6 +247,167 @@ Proof.
     iIntros "(_ & %v & Hx & Hv)".
     wp_pures.
     wp_load.
+    done.
+Qed.
+
+(* ################################################################# *)
+
+(* WHAT HAPPENS IF WE DON't USE GHOST STATE? *)
+
+Definition lock_inv_no_ghost l P : iProp Σ :=
+  ∃ b : bool, l ↦ #b ∗
+  if b then True
+  else P.
+
+(**
+  The representation predicate then just asserts that the value
+  representing the lock is a location which satisfies the lock
+  invariant.
+*)
+Definition is_lock_no_ghost v P : iProp Σ :=
+  ∃ l : loc, ⌜v = #l⌝ ∗ inv N (lock_inv_no_ghost l P).
+
+(* ================================================================= *)
+(** ** Specifications *)
+
+(**
+  Making a new lock consists of giving away ownership of the resources
+  to be protected, [P], to the lock.
+*)
+Lemma mk_lock_spec_no_ghost P :
+  {{{ P }}} mk_lock #() {{{ v, RET v; is_lock_no_ghost v P }}}.
+Proof.
+  iIntros "%Φ HP HΦ".
+  wp_lam.
+  wp_alloc l as "Hl".
+  iMod (inv_alloc N _ (lock_inv_no_ghost l P) with "[HP Hl]") as "I".
+  {
+    iNext.
+    iExists false.
+    iFrame.
+  }
+  iModIntro.
+  iApply "HΦ".
+  iExists l. auto.
+Qed.
+
+(**
+  Acquiring the lock should grant access to the protected resources as
+  well as knowledge that the lock has been locked.
+*)
+Lemma acquire_spec_no_ghost v P :
+  {{{ is_lock_no_ghost v P }}} acquire v {{{ RET #(); P }}}.
+Proof.
+  iIntros "%Φ (%l & -> & #I) HΦ".
+  iLöb as "IH".
+  wp_rec.
+  wp_bind (CmpXchg _ _ _).
+  iInv "I" as ([]) "[Hl Hγ]".
+  - wp_cmpxchg_fail.
+    iModIntro.
+    iSplitL "Hl Hγ".
+    {
+      iNext.
+      iExists true.
+      iFrame.
+    }
+    wp_pures.
+    wp_apply ("IH" with "HΦ").
+  - wp_cmpxchg_suc.
+    iModIntro.
+    iSplitL "Hl".
+    {
+      iNext.
+      iExists true.
+      iFrame.
+    }
+    wp_pures.
+    iModIntro.
+    iApply ("HΦ" with "Hγ").
+Qed.
+
+(**
+  Releasing the lock consists of transferring back the protected
+  resources and the [locked] predicate to the lock.
+*)
+Lemma release_spec_no_ghost v P :
+  {{{ is_lock_no_ghost v P ∗ P }}} release v {{{ RET #(); True }}}.
+Proof.
+  iIntros "%Φ [H H1] H2". rewrite /release.
+  wp_pures. rewrite /is_lock_no_ghost.
+  iDestruct "H" as "(%l & %H3 & H4)".
+  rewrite H3.  
+  (* Open the lock invariant so we can analyze the two cases *)
+  iInv "H4" as ([]) "(H5 & H6)".
+  - (* We don't have access to the lock in the first place*)
+    wp_store. iModIntro. iSplitR "H2".
+    + iNext. rewrite /lock_inv. iExists false. iFrame.
+    + iApply "H2". auto.
+  - (* We tried to release it twice? *)
+    wp_store. iModIntro. iSplitR "H2".
+    + rewrite /lock_inv_no_ghost. iModIntro. iExists false. iFrame.
+    + iApply "H2". auto.
+Qed.
+
+(* ================================================================= *)
+(** ** Example Client *)
+
+(** Consider the following client of lock. *)
+Definition prog_no_ghost : expr :=
+  let: "x" := ref #0 in
+  let: "l" := mk_lock #() in
+  Fork (
+    acquire "l";;
+    "x" <- #7;;
+    "x" <- #1;;
+    release "l"
+  );;
+  acquire "l";;
+  !"x".
+
+(**
+  [x] can take on the values of [0], [1], and [7]. However, we should
+  not observe [7], as it is overridden before the lock is released.
+ *)
+(* can we derive false now that we can duplicate propositions *)
+(* Is the abstract specification for a lock part of the TCB? *)
+Lemma prog_spec_no_ghost : ⊢ WP prog {{ v, ⌜v = #0 ∨ v = #1⌝}}.
+Proof.
+  rewrite /prog.
+  wp_alloc x as "Hx".
+  wp_pures.
+  (**
+    For this program, the resource to be protected is the points-to
+    predicate for [x], but where the value pointed to by [x] can be only
+    [0] or [1].
+  *)
+  wp_apply (mk_lock_spec_no_ghost (∃ v, x ↦ v ∗ ⌜v = #0 ∨ v = #1⌝) with "[Hx]").
+  {
+    iExists #0.
+    iFrame.
+    by iLeft.
+  }
+  iIntros "%l #Hl".
+  wp_pures.
+  wp_apply wp_fork.
+  - wp_apply (acquire_spec_no_ghost with "Hl").
+    iIntros "H".
+    iDestruct "H" as "(%v & H1 & H2)".
+    wp_pures.
+    wp_store.
+    wp_store.
+    wp_apply (release_spec_no_ghost with "[H1 H2]"); last done.
+    iSplitL "Hl".
+    + iApply "Hl".
+    + iExists #1. iFrame. iPureIntro. auto.
+  - wp_pures.
+    wp_apply (acquire_spec_no_ghost with "Hl").
+    iIntros "H".
+    iDestruct "H" as "(%v & H1 & %H2)".
+    wp_pures.
+    wp_load.
+    iModIntro.
+    iPureIntro.
     done.
 Qed.
 
