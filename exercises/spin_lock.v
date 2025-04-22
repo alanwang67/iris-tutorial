@@ -189,7 +189,8 @@ Proof.
     wp_store. iModIntro. iSplitR "HΦ".
     + iNext. rewrite /lock_inv. iExists false. iFrame.
     + iApply "HΦ". auto.
-  - (* We tried to release it twice? *)
+  - (* We tried to reacquire the lock after already acquiring it so
+     it doesn't hold up *)
     wp_store. iModIntro. iDestruct "H6" as "[H6 H7]".
     iExFalso. iApply (locked_excl with "H2 H6").
 Qed.
@@ -354,8 +355,7 @@ Proof.
     wp_store. iModIntro. iSplitR "H2".
     + iNext. rewrite /lock_inv. iExists false. iFrame.
     + iApply "H2". auto.
-  - (* We tried to release it twice? *)
-    wp_store. iModIntro. iSplitR "H2".
+  - wp_store. iModIntro. iSplitR "H2".
     + rewrite /lock_inv_no_ghost. iModIntro. iExists false. iFrame.
     + iApply "H2". auto.
 Qed.
@@ -374,8 +374,8 @@ Definition prog_no_ghost : expr :=
     release "l"
     );;
   acquire "l";;
-  !"x";;
-  release "l".
+  acquire "l";;
+  !"x".
 
 (**
   [x] can take on the values of [0], [1], and [7]. However, we should
@@ -417,6 +417,9 @@ Proof.
     iIntros "H".
     iDestruct "H" as "(%v & H1 & %H2)".
     wp_pures.
+    wp_apply (acquire_spec_no_ghost with "Hl").
+    iIntros "H".
+    iDestruct "H" as "(%v1 & H & %H2)".
     wp_load.
     (* iModIntro.
     iPureIntro.

@@ -74,6 +74,10 @@ Definition spawn : val :=
     Fork ("c" <- SOME ("f" #()));;
     "c".
 
+(* The ref should be atomic right?
+   Yes writing into the ref seems to be atomic. Maybe since we are
+   assuming sequential consistency this is okay? 
+ *)
 Definition join: val :=
   rec: "join" "c" :=
     match: !"c" with
@@ -162,11 +166,19 @@ Proof.
     by iApply "IH".
   - wp_load.
     iModIntro.
+    iSplitR "HΦ".
+    { rewrite /handle_inv1. iModIntro. iExists (InjRV w). iFrame. iRight. iExists w. iFrame.
+      auto. }
+    wp_pures. iApply "HΦ". iModIntro.
     (** 
       Now we need [HΨ] to reestablish the invariant, but we also need it
       for the postcondition. We are stuck... 
     *)
 Abort.
+
+(* The intution behind what we want to do is that if join is called then we don't need to
+ actually reestablish the invariant, also we want to rule out the behavior of join
+ being called twice *)
 
 (**
   We need a way to keep track of whether [Ψ w] has been `taken out' of
@@ -178,6 +190,43 @@ Abort.
   implemented.
 *)
 Context `{!tokenG Σ}.
+
+(* How can we make sure we initially satisify the invariant *)
+(* and when we exit we also satisfy it as well *)
+(* Definition handle_inv γ (l : loc) (Ψ : val → iProp Σ) : iProp Σ :=
+  ∃ v : val, l ↦ v ∗ (⌜v = NONEV⌝ ∨ (∃ w : val, ⌜v = SOMEV w⌝ ∗ Ψ w) ∨ token γ). *)
+
+(* We forgot to provide the token in the join handle 
+   We need this because this is basically the protocol that is occuring 
+   We get to replace the resource Ψ v with token, and this right is transfered to us
+   by using the join_handle *)
+(* Definition join_handle γ (h : val) (Ψ : val → iProp Σ) : iProp Σ :=
+  ∃ l : loc, ⌜h = #l⌝ ∗ inv N (handle_inv γ l Ψ). *)
+
+(* Lemma join_spec γ (h : val) (Ψ : val → iProp Σ) :
+  {{{ join_handle γ h Ψ }}} join h {{{ v, RET v; Ψ v }}}.
+Proof.
+  iIntros (Φ) "(%l & -> & #I) HΦ".
+  iLöb as "IH".
+  wp_rec.
+  wp_bind (! _)%E.
+  rewrite /handle_inv.
+  iInv "I" as (v) "[H [> %H1 | H2]]". 
+  - wp_load.
+    iModIntro.
+    iSplitL "H".
+    {
+      iNext.
+      iExists NONEV. subst. iFrame. auto. 
+    }
+    subst. wp_pures.
+    by iApply "IH".
+  - wp_load. iDestruct "H2" as "[(%w & %H3 & H4) | H5]".
+    + iModIntro. iSplitR "HΦ".
+      * iFrame. iRight. iLeft. iExists w. iModIntro. iFrame. auto.
+      * rewrite H3. wp_pures. iApply "HΦ".  admit.
+    + iModIntro. 
+Admitted. *)
 
 (**
   The trick is to have an additional state in the invariant which
@@ -203,86 +252,74 @@ Definition join_handle (h : val) (Ψ : val → iProp Σ) : iProp Σ :=
   [spawn].
 *)
 
+(* Q: how can there be a token in our join_handle as well as in our invariant
+   this seems like a contradiction
+   A: It's not a contradicition since the conditions for the invariant are chained together
+   by or's 
+   everytime we have opened the invariant we have never used the token we have created to
+   close it 
+ *)
 Lemma spawn_spec (P : iProp Σ) (Ψ : val → iProp Σ) (f : val) :
   {{{ P }}} f #() {{{ v, RET v; Ψ v }}} -∗
   {{{ P }}} spawn f {{{ h, RET h; join_handle h Ψ }}}.
 Proof.
-  iIntros "#Hf %Φ !> HP HΦ".
-  wp_lam.
-  wp_alloc l as "Hl".
+  iIntros "#H %Φ". iModIntro. iIntros "H1 H2". rewrite /spawn.
+  iMod (token_alloc) as "(%γ & H4)".
+  wp_pures. wp_alloc l as "H3".
+  (* When can we allocate our invariant in Iris? *)
+  (* why do we need "with []" *)
+  iMod (inv_alloc N _ (handle_inv γ l Ψ) with "[H3]") as "#inv".
+  { rewrite /handle_inv. iModIntro. iExists (InjLV #()). iFrame. auto. } 
   wp_pures.
-  iMod token_alloc as "[%γ Hγ]".
-  iMod (inv_alloc N _ (handle_inv γ l Ψ) with "[Hl]") as "#I".
-  {
-    iNext.
-    iExists NONEV.
-    iFrame.
-    by iLeft.
-  }
-  wp_apply (wp_fork with "[Hf HP]").
-  - iNext.
-    wp_apply ("Hf" with "HP").
-    iIntros "%v HΨ".
-    wp_pures.
-    iInv "I" as "(%w & Hl & _)".
-    wp_store.
-    iModIntro.
-    iSplitL; last done.
-    iNext.
-    iExists (SOMEV v).
-    iFrame.
-    iRight.
-    iLeft.
-    iExists v.
-    by iFrame.
-  - wp_pures.
-    iModIntro.
-    iApply "HΦ".
-    iExists γ, l.
-    by iFrame "Hγ I".
+  wp_apply (wp_fork with "[H1]").
+  - iModIntro. wp_bind (f #()). iApply ("H" with "H1").
+    iModIntro. iIntros (v) "H1". wp_pures.
+    iInv "inv" as "H2".
+    (* So we are opening the invariant here in order to update the value when we fork,
+       and we have to consider which case in the invariant we are in 
+     *)
+    rewrite /handle_inv. iDestruct "H2" as "(%v1 & H2 & H3)".
+    iDestruct "H3" as "[H3 | [H4 | H5]]".
+    + (* We are in the first case where there is nothing in the ref yet,
+         so we can update it
+       *) 
+      wp_store. iModIntro. iSplitR ""; auto.
+      iModIntro. iExists (InjRV v). iFrame. iRight. iLeft. iExists v. iFrame. auto.
+    + (* The value is no longer InjLV and has already been updated once before *)
+      wp_store. iModIntro. iSplitR ""; auto.
+      iModIntro. iExists (InjRV v). iFrame. iRight. iLeft. auto.
+    + (* For the case of the token closing the invariant is trivially satisfied *)
+      wp_store. iModIntro. iFrame. 
+  - (* We are showing after the fork we should give back the location and show that
+     the location we give back satisfies the join handle *)
+    wp_pures. iModIntro. iApply "H2". rewrite /join_handle. iFrame. iExists l. auto.
 Qed.
 
 Lemma join_spec (Ψ : val → iProp Σ) (h : val) :
   {{{ join_handle h Ψ }}} join h {{{ v, RET v; Ψ v }}}.
 Proof.
-  iIntros (Φ) "(%γ & %l & -> & Hγ & #I) HΦ".
-  iLöb as "IH".
-  wp_rec.
-  wp_bind (! #l)%E.
-  (** We open the invariant and consider the three possible states. *)
-  iInv "I" as "(%_ & Hl & [>-> | [(%w & >-> & HΨ) | >Hγ']])".
-  - (** Case: The forked-off thread is not yet finished. *)
-    wp_load.
-    iModIntro.
-    iSplitL "Hl".
-    {
-      iNext.
-      iExists NONEV.
-      iFrame.
-      by iLeft.
-    }
-    wp_pures.
-    iApply ("IH" with "Hγ HΦ").
-  - (** Case: The forked-off thread has finished. *)
-    wp_load.
-    iModIntro.
-    (**
-      Note that now, since we own the token, we do not need to use [Ψ w]
-      to close the invariant – we close it with the token.
-    *)
-    iSplitL "Hγ Hl".
-    {
-      iNext.
-      iExists (SOMEV w).
-      iFrame.
-    }
-    wp_pures.
-    by iApply "HΦ".
-  - (**
-      Case: [Ψ w] has already been taken out of the invariant.
-      This case is impossible as we own the token.
-    *)
-    iPoseProof (token_exclusive with "Hγ Hγ'") as "[]".
+  iIntros "%Φ H H1". rewrite /join /join_handle. iLöb as "IH". wp_pures.
+  iDestruct "H" as "(%γ & %l & %H & H2 & #inv)". rewrite H.
+  wp_bind (! _)%E.
+  iInv "inv" as "(%v & H & [> %H3 | [H4 | >H5]])".
+  - (* we are in the case of inv where the value hasn't been updated yet so we should
+       expect to use Lob here & reestablish the invariant *)
+    wp_load. iModIntro. iSplitR "H1 H2".
+    + rewrite /handle_inv. iFrame. iLeft. auto.
+    + rewrite H3. wp_pure. wp_pure. wp_pure. iApply ("IH" with "[H2]").
+      * iExists γ. iExists l. iFrame. auto.
+      * iApply "H1".
+  - (* We are in the case where the fork has already updated the value *)
+    wp_load. iModIntro. iSplitR "H1 H4".
+    + rewrite /handle_inv. iFrame.
+    + (* We have solved the previous issue and we can show that the value we get from the fork
+         satisifies the post condition since we gave the token to the invariant
+       *)
+      iDestruct "H4" as "(%w & %H2 & H3)". rewrite H2. wp_pures. iApply "H1". auto.
+  - (* We are in the case where there are two tokens so we should be able to derive false,
+       this happens we the join thread has already transfered us ownership of the token 
+     *)
+    wp_pures. iExFalso. iApply (token_exclusive with "H2 H5").
 Qed.
 
 End spawn.
@@ -396,6 +433,11 @@ End par.
   Our specification will state that the resulting value is even.
 *)
 
+(* Does the operational semantics allow for !r to run to run before FAA,
+   in this case it seems like it doesn't matter?
+   A: No I think the parallel operations must finish at least this appears to be what is
+   the case when I step through the WP 
+ *)
 Definition parallel_add : expr :=
   let: "r" := ref #0 in
   (FAA "r" #2)
@@ -452,7 +494,20 @@ Proof.
       by apply Zeven_plus_Zeven.
     }
     by iApply "HΦ'".
-  (* exercise *)
-Admitted.
+  - iIntros (Φ') "!> _ HΦ'".
+    iInv "I" as "(%n & Hr & >%Hn)".
+    wp_faa. iModIntro. iSplitR "HΦ'".
+    + iModIntro. rewrite /parallel_add_inv. iExists (n + 6)%Z.
+      iFrame. iPureIntro.
+      by apply Zeven_plus_Zeven.
+    + iApply "HΦ'". auto.
+  - auto.
+  - (* This is the case where we perform the derference *)
+    iIntros (v1 v2) "H". wp_pures.
+    iInv "I" as "> H1". rewrite /parallel_add_inv. iDestruct "H1" as "(%n & H1 & %H2)".
+    wp_load. iModIntro. iFrame. iSplitR.
+    { iModIntro. auto. }
+    { iApply "HΦ". auto. }
+Qed.
 
 End parallel_add.
