@@ -252,7 +252,7 @@ Qed.
 
 (* ################################################################# *)
 
-(* WHAT HAPPENS IF WE DON't USE GHOST STATE? *)
+(* WHAT HAPPENS IF WE DON'T USE GHOST STATE? *)
 
 Definition lock_inv_no_ghost l P : iProp Σ :=
   ∃ b : bool, l ↦ #b ∗
@@ -329,7 +329,18 @@ Qed.
 (**
   Releasing the lock consists of transferring back the protected
   resources and the [locked] predicate to the lock.
-*)
+ *)
+(* Why do we need the token to tell us when we can give us ownership rather than
+   if we have the resource that is protected by the logic.
+   i.e.
+   if we can give up the resource that is protected by the lock then we will be following
+   that same transition from locked to unlocked,
+
+   Since P is an exclusive resource
+   by meaning of the seperating conjunction, why do we need a
+   token for a spin lock when the resource being protected is serving the same purpose
+   in terms of not allowing us to release a lock twice? 
+ *)
 Lemma release_spec_no_ghost v P :
   {{{ is_lock_no_ghost v P ∗ P }}} release v {{{ RET #(); True }}}.
 Proof.
@@ -361,9 +372,10 @@ Definition prog_no_ghost : expr :=
     "x" <- #7;;
     "x" <- #1;;
     release "l"
-  );;
+    );;
   acquire "l";;
-  !"x".
+  !"x";;
+  release "l".
 
 (**
   [x] can take on the values of [0], [1], and [7]. However, we should
@@ -371,9 +383,9 @@ Definition prog_no_ghost : expr :=
  *)
 (* can we derive false now that we can duplicate propositions *)
 (* Is the abstract specification for a lock part of the TCB? *)
-Lemma prog_spec_no_ghost : ⊢ WP prog {{ v, ⌜v = #0 ∨ v = #1⌝}}.
+Lemma prog_spec_no_ghost : ⊢ WP prog_no_ghost {{ v, ⌜v = #0 ∨ v = #1⌝}}.
 Proof.
-  rewrite /prog.
+  rewrite /prog_no_ghost.
   wp_alloc x as "Hx".
   wp_pures.
   (**
@@ -406,9 +418,12 @@ Proof.
     iDestruct "H" as "(%v & H1 & %H2)".
     wp_pures.
     wp_load.
-    iModIntro.
+    (* iModIntro.
     iPureIntro.
-    done.
+    done. *)
+    wp_pures.
+    wp_apply (release_spec_no_ghost with "[H1 ]"). { iSplit; auto. }
+    iIntros "H". 
 Qed.
 
 End proofs.
