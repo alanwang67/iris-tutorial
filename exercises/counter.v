@@ -37,6 +37,8 @@ Definition read : val :=
 (* ================================================================= *)
 (** ** Defining a Representation Predicate for the Counter *)
 
+(* Q: What does it mean if we choose a representation predicate that is incorrect? *)
+
 Module spec1.
 Section spec1.
 Context `{heapGS Σ}.
@@ -98,7 +100,18 @@ Definition is_counter3 (v : val) (n : nat) : iProp Σ :=
   In our case, we will use the authoritative RA over the [max_nat]
   resource algebra. The carrier of [max_nat] is the natural numbers, and
   the operation is the maximum.
-*)
+ *)
+
+(* What does it mean that the fragment inherits all the operations of [A]?
+   I'm assuming in this case A is the carrier
+ *)
+
+(* Intution: Using the authorative RA we can represent both the part that is exclusive
+   when you access the shared resource, while each thread can also maintain knowledge that
+   will never be invalidated by anyone who acquires the lock. So in a sense we still have
+   stable assertions, despite the fact that our state is changing 
+ *)
+
 Context `{!inG Σ (authR max_natUR)}.
 
 (**
@@ -150,6 +163,7 @@ Proof.
     done.
 Qed.
 
+(* Is this directly inherited from the carrier of the RA? *)
 Lemma state_valid γ n m :
   own γ (● MaxNat n) -∗
   own γ (◯ MaxNat m) -∗
@@ -164,6 +178,7 @@ Proof.
   done.
 Qed.
 
+(* This update state does not invalidate any fragments *)
 Lemma update_state γ n :
   own γ (● MaxNat n) ==∗
   own γ (● MaxNat (S n)) ∗ own γ (◯ MaxNat (S n)).
@@ -196,14 +211,29 @@ Qed.
 Lemma mk_counter_spec :
   {{{ True }}} mk_counter #() {{{ c γ, RET c; is_counter c γ 0}}}.
 Proof.
-  (* exercise *)
-Admitted.
+  iIntros "%Φ HΦ H". rewrite /mk_counter /is_counter.
+  wp_pures. wp_alloc l as "H1".
+  iMod (alloc_initial_state) as "(%γ & H2 & H3)".
+  iMod (inv_alloc N _ (∃ m : nat, l ↦ #m ∗ own γ (● MaxNat m)) with "[H1 H2]") as "#H4".
+  { iExists 0. iFrame. }
+  iApply "H". iModIntro.
+  iExists l. iFrame. auto. 
+Qed.
 
 Lemma read_spec c γ n :
   {{{ is_counter c γ n }}} read c {{{ (u : nat), RET #u; ⌜n ≤ u⌝ }}}.
 Proof.
-  (* exercise *)
-Admitted.
+  iIntros "%Φ (%l & -> & #Hγ' & #HI) HΦ".
+  iLöb as "IH".
+  wp_rec.
+  iInv "HI" as "(%m & H & H1)".
+  wp_load.
+  (* If I put the percent here than my own γ (● MaxNat m) is preserved,
+     which makes sense since the ghost state can only be updated in way that are valid 
+   *)
+  iPoseProof (state_valid γ m n with "H1 Hγ'") as "%H3".
+  iFrame. iApply "HΦ". iModIntro. auto. 
+Qed.
 
 Lemma incr_spec c γ n :
   {{{ is_counter c γ n }}}
@@ -213,21 +243,37 @@ Proof.
   iIntros "%Φ (%l & -> & #Hγ' & #HI) HΦ".
   iLöb as "IH".
   wp_rec.
-  wp_bind (! _)%E.
-  iInv "HI" as "(%m & Hl & Hγ)".
+  wp_bind (! #l)%E.
+  iInv "HI" as "(%m & H & H1)".
   wp_load.
   iModIntro.
-  iSplitL "Hl Hγ".
-  { iExists m. iFrame. }
-  wp_pures.
-  wp_bind (CmpXchg _ _ _).
-  iInv "HI" as "(%m' & Hl & Hγ)".
-  destruct (decide (#m = #m')) as [e | ne].
-  - wp_cmpxchg_suc.
-    injection e as e.
-    apply (inj Z.of_nat) in e.
-    subst m'.
-    (* exercise *)
+  (* We have to reestablish the invariant now *)
+  iSplitL "H H1". { iExists m. iFrame.}
+  wp_pures. wp_bind (CmpXchg _ _ _)%E.
+  iInv "HI" as "(%m1 & H & H1)".
+  destruct (decide (m1 = m)).
+  - (* We can update the value bc. CAS is valid, but we also need to update the ghost state *)
+    (* I think if we update the ghost state in a way that is valid, but does not match
+     up with how the program executes then we just won't be able to complete the proof *)
+    subst. wp_cmpxchg_suc.
+    iPoseProof (state_valid γ (m) (n) with "H1 Hγ'") as "%H".    
+    iMod (update_state γ m with "H1") as "H2".
+    iDestruct "H2" as "[H2 #H3]".
+    iPoseProof (state_valid γ (S m) (S m) with "H2 H3") as "%H1".
+    iModIntro.
+    iSplitL "H H2". { iModIntro. iExists (m + 1). admit. }
+    wp_pures. iModIntro. iApply "HΦ". iSplitL ""; auto. rewrite /is_counter.
+    iExists l. iSplitL ""; auto. iSplitL ""; auto.
+    iPoseProof (own_valid with "Hγ'") as "H".
+    assert (S m `max` S n = (S m)) by lia.
+    assert (MaxNat (S m) ⋅ MaxNat (S n) = MaxNat (S m)). { rewrite max_nat_op. rewrite H0.
+                                                             auto. }
+    rewrite <- H2. iDestruct "H3" as "[H3 H4]". simpl. iApply "H4".
+  - subst. wp_cmpxchg_fail. (* We want to use Lob on this case *)
+    { admit. }
+    iModIntro.
+    iSplitL "H H1". { iExists m1. iFrame. }
+    wp_pures. iApply "IH". iApply "HΦ".
 Admitted.
 
 (* ================================================================= *)
@@ -249,8 +295,16 @@ Lemma par_incr :
     read "c"
   {{{ n, RET #(S n); True }}}.
 Proof.
-  (* exercise *)
-Admitted.
+  iIntros "%Φ HΦ H".
+  wp_apply (mk_counter_spec); auto.
+  iIntros (c γ) "#H1". wp_pures.
+  wp_apply (wp_par (λ _, is_counter c γ 1) (λ _, is_counter c γ 1)).
+  { wp_apply (incr_spec); auto. iIntros (u) "(H & #H2)". iApply "H2". }
+  { wp_apply (incr_spec); auto. iIntros (u) "(H & #H2)". iApply "H2". }
+  iIntros (v1 v2) "(#H2 & #H3)". iModIntro. wp_pures. wp_apply (read_spec). { iApply "H2". }
+  iIntros (u) "%H4". assert (u ≠ 0) by lia. apply Nat.succ_pred in H. rewrite <- H.
+  iApply "H". auto.
+Qed.
 
 End spec1.
 End spec1.
@@ -279,6 +333,10 @@ Section spec2.
   numbers with addition.
 *)
 
+(* Intuition: I think we use frac because when all the threads are joined back up
+   we can determine the actual value
+*)
+  
 Context `{!heapGS Σ, !inG Σ (authR (optionUR (prodR fracR natR)))}.
 
 Let N := nroot .@ "counter".
@@ -407,22 +465,38 @@ Qed.
 Lemma mk_counter_spec :
   {{{ True }}} mk_counter #() {{{ c γ, RET c; is_counter c γ 0 1}}}.
 Proof.
-  (* exercise *)
-Admitted.
-
+  iIntros (Φ) "H1 H2". rewrite /mk_counter. wp_pures. wp_alloc l as "H3".
+  iMod (alloc_initial_state) as "(%γ & H4 & H5)".
+  iMod (inv_alloc N _ (∃ m : nat, l ↦ #m ∗ own γ (● Some (1%Qp, m))) with "[H3 H4]") as "#inv".
+  { iExists 0. iFrame. }
+  iModIntro. iApply "H2".
+  iExists l. iFrame. auto.
+Qed.
+  
 Lemma read_spec (c : val) (γ : gname) (n : nat) (q : Qp) :
   {{{ is_counter c γ n q }}}
     read c
   {{{ (u : nat), RET #u; is_counter c γ n q ∗ ⌜n ≤ u⌝ }}}.
 Proof.
-  (* exercise *)
-Admitted.
+  iIntros "%Φ (%l & -> & Hγ' & #I) HΦ".
+  rewrite /read. wp_pures.
+  iInv "I" as "(%m & H & H1)".
+  wp_load.
+  iPoseProof (state_valid γ m n with "H1 Hγ'") as "%H2".
+  iFrame. iApply "HΦ". iFrame. iModIntro. iSplitL "". iExists l; auto.
+  auto.
+Qed.
 
 Lemma read_spec_full (c : val) (γ : gname) (n : nat) :
   {{{ is_counter c γ n 1 }}} read c {{{ RET #n; is_counter c γ n 1 }}}.
 Proof.
-  (* exercise *)
-Admitted.
+  iIntros "%Φ (%l & -> & Hγ' & #I) HΦ".
+  rewrite /read. wp_pures.
+  iInv "I" as "(%m & H & H1)".
+  wp_load.
+  iPoseProof (state_valid_full γ m n with "H1 Hγ'") as "%H2".
+  iFrame. subst. iApply "HΦ". iFrame. iModIntro. iExists l. iSplitL; auto.
+Qed.
 
 Lemma incr_spec (c : val) (γ : gname) (n : nat) (q : Qp) :
   {{{ is_counter c γ n q }}}
@@ -446,6 +520,9 @@ Proof.
     apply (inj Z.of_nat) in e.
     subst m'.
     wp_cmpxchg_suc.
+    (* This follows through in a similiar way as the previoius proofs *)
+    iSplitL.
+    + iModIntro. iExists (m + 1). 
     (* exercise *)
 Admitted.
 
